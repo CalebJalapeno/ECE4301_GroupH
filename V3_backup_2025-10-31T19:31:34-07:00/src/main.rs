@@ -1,5 +1,3 @@
-mod video;
-use video::{start_sender_pipeline, ReceiverVideo};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io;
@@ -104,14 +102,15 @@ async fn sender(host: &str, port: u16, mech: &str) -> io::Result<()> {
     write_msg(&mut s, &Msg::Confirm { ct }).await?;
     eprintln!("SENDER: handshake complete ({mech})");
 
-    // Start camera ? H.264 AU stream (set device+resolution as you prefer)
-    let rx_aus = start_sender_pipeline("/dev/video0", 640, 480, 15).expect("gstreamer sender");
-
-    // Encrypt and send each AU
-    for (seq, au) in (1u64..).zip(rx_aus.iter()) {
+    // Dummy encrypted frames (replace with video bytes later)
+    for seq in 1u64..=100 {
         let ts_ns = now_ns();
-        let ct = crypto.enc_tx.seal(crypto.n_tx.next(), seq, &au);
+        let payload = format!("frame-{seq:06}").into_bytes();
+        let ct = crypto
+            .enc_tx
+            .seal(crypto.n_tx.next(), seq, &payload);
         write_msg(&mut s, &Msg::Frame { seq, ts_ns, ct }).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     Ok(())
 }
@@ -149,17 +148,15 @@ async fn receiver(port: u16) -> io::Result<()> {
     }
     eprintln!("RECEIVER: handshake complete");
 
-    let video = ReceiverVideo::new().expect("gstreamer receiver");
-
     // Receive frames, decrypt with RX direction
     loop {
         match read_msg(&mut s).await {
-             Ok(Msg::Frame { seq, ts_ns, ct }) => {
-		let au = crypto.enc_rx.open(crypto.n_rx.next(), seq, &ct); // decrypt
-		let latency_ms = (now_ns().saturating_sub(ts_ns)) as f64 / 1e6;
-		eprintln!("frame seq={seq} len={} ~{latency_ms:.2} ms", au.len());
-    		video.push_au(&au); // <-- display the video
-	    }
+            Ok(Msg::Frame { seq, ts_ns, ct }) => {
+                let data = crypto.enc_rx.open(crypto.n_rx.next(), seq, &ct);
+                let latency_ms = (now_ns().saturating_sub(ts_ns)) as f64 / 1e6;
+                eprintln!("frame seq={seq} len={} ~{latency_ms:.2} ms", data.len());
+                // later: push `data` into video appsrc
+            }
             Ok(other) => eprintln!("unexpected {:?}", other),
             Err(e) => {
                 eprintln!("recv done: {e}");

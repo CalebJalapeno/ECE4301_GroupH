@@ -89,6 +89,9 @@ struct CryptoDirs {
 }
 
 async fn sender(host: &str, port: u16, mech: &str) -> io::Result<()> {
+    use std::io;
+    use tokio::net::TcpStream;
+
     let addr = format!("{host}:{port}");
     eprintln!("SENDER: connecting to {addr}");
     let mut s = TcpStream::connect(&addr).await?;
@@ -100,21 +103,24 @@ async fn sender(host: &str, port: u16, mech: &str) -> io::Result<()> {
     };
 
     // Confirm (seq=0)
-    let ct = crypto.enc_tx.seal(crypto.n_tx.next(), 0, b"confirm");
-    write_msg(&mut s, &Msg::Confirm { ct }).await?;
+    let ct0 = crypto.enc_tx.seal(crypto.n_tx.next(), 0, b"confirm");
+    write_msg(&mut s, &Msg::Confirm { ct: ct0 }).await?;
     eprintln!("SENDER: handshake complete ({mech})");
 
-    // after handshake completes
-    let rx_aus = start_sender_pipeline("/dev/video0", 640, 480, 15).expect("gstreamer sender");
+    // ---- CAMERA ? H.264 AUs ? ENCRYPT ? SEND ----
+    // Change /dev/video0 if your webcam node is different (check with: ls -l /dev/video*)
+    let rx_aus = start_sender_pipeline("/dev/video0", 640, 480, 15)
+        .expect("gstreamer sender");
 
-    // Encrypt and send each access unit
     for (seq, au) in (1u64..).zip(rx_aus.iter()) {
+        eprintln!("SENDER: AU {} bytes", au.len()); // helpful debug
         let ts_ns = now_ns();
         let ct = crypto.enc_tx.seal(crypto.n_tx.next(), seq, &au);
         write_msg(&mut s, &Msg::Frame { seq, ts_ns, ct }).await?;
     }
     Ok(())
 }
+
 
 async fn receiver(port: u16) -> io::Result<()> {
     let addr = format!("0.0.0.0:{port}");
@@ -156,9 +162,9 @@ async fn receiver(port: u16) -> io::Result<()> {
     	match read_msg(&mut s).await {
     	    Ok(Msg::Frame { seq, ts_ns, ct }) => {
     	        let au = crypto.enc_rx.open(crypto.n_rx.next(), seq, &ct);
+		video.push_au(&au);
     	        let latency_ms = (now_ns().saturating_sub(ts_ns)) as f64 / 1e6;
     	        eprintln!("frame seq={seq} len={} ~{latency_ms:.2} ms", au.len());
-    	        video.push_au(&au);
             }
             Ok(other) => eprintln!("unexpected {:?}", other),
             Err(e) => {
